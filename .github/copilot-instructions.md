@@ -52,4 +52,6 @@ You are an expert in TypeScript, Node.js, and Static Analysis. You are building 
 * identify top 3 performance bottlenecks and how to mitigate them.
 * follow best practices for error handling and identify top 3 error scenarios which can occur with each module and handle them via finding route cause of each errors.
 * also verify that the code adheres to the principles mentioned above.
-* after verification only push it to the main branch.
+* after verification only push it to the main branch for each prompt.
+* wait for terminal output before starting next part of the implementation.
+* after each prompt completion push to github main branch.

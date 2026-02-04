@@ -4,9 +4,10 @@ import { Command } from 'commander';
 import chalk from 'chalk';
 import * as path from 'path';
 import * as fs from 'fs';
+import { Project } from 'ts-morph';
 import { GitService } from './git';
 import { Analyzer } from './analyzer';
-import { AnalysisReport, FileAnalysisResult, FileStatus, ImpactType } from './types';
+import { AnalysisReport, FileAnalysisResult, FileStatus, ImpactType, FileDiff } from './types';
 
 /**
  * Smart Test Selector CLI
@@ -21,12 +22,13 @@ program
   .name('test-selector')
   .description('Identify which tests need to run based on Git changes')
   .version('1.0.0')
-  .requiredOption('--commit <sha>', 'The commit SHA to compare against HEAD')
+  .option('--commit <sha>', 'The commit SHA to compare against HEAD')
   .requiredOption('--repo <path>', 'Path to the Git repository')
   .option('--json', 'Output results as JSON (for CI pipelines)', false)
+  .option('--all', 'Analyze ALL tests in the repository (ignores git)', false)
   .parse(process.argv);
 
-const options = program.opts<{ commit: string; repo: string; json: boolean }>();
+const options = program.opts<{ commit?: string; repo: string; json: boolean; all: boolean }>();
 
 /**
  * JSON output schema for CI pipelines.
@@ -284,7 +286,17 @@ async function main(): Promise<void> {
   try {
     // Resolve the repository path (handles relative paths)
     const repoPath = path.resolve(options.repo);
-    const commitSha = options.commit;
+    const commitSha = options.commit || 'ALL';
+    
+    // Validate required options
+    if (!options.all && !options.commit) {
+      if (options.json) {
+        console.log(JSON.stringify({ files: [], tests: [], grep: "" }));
+        process.exit(1);
+      }
+      logger.error(chalk.red('✖ Error: Either --commit or --all must be specified'));
+      process.exit(1);
+    }
     
     // Validate repository path exists
     if (!fs.existsSync(repoPath)) {
@@ -312,39 +324,71 @@ async function main(): Promise<void> {
     logger.log(chalk.gray(`Repository: ${repoPath}`));
     logger.log(chalk.gray(`Commit: ${commitSha}`));
     
-    // Instantiate GitService and fetch changed files
-    const gitService = new GitService(repoPath);
+    let changedFiles: FileDiff[];
     
-    let changedFiles;
-    try {
-      changedFiles = await gitService.getChangedFiles(commitSha);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Unknown error';
-      if (options.json) {
-        console.log(JSON.stringify({ files: [], tests: [], grep: "" }));
+    if (options.all) {
+      // --- NEW LOGIC: SCAN EVERYTHING ---
+      logger.log(chalk.blue('🔍 Scanning entire repository (Mode: ALL)...'));
+      
+      // Create a temporary project just to get all source files
+      const project = new Project({
+        tsConfigFilePath: path.join(repoPath, 'tsconfig.json'),
+        skipAddingFilesFromTsConfig: false,
+      });
+      
+      // Get every .ts file in the repo
+      const allSourceFiles = project.getSourceFiles();
+      
+      // Filter out node_modules and map to FileDiff structure
+      changedFiles = allSourceFiles
+        .filter(file => {
+          const filePath = file.getFilePath();
+          return !filePath.includes('node_modules');
+        })
+        .map(file => ({
+          path: path.relative(repoPath, file.getFilePath()),
+          status: 'MODIFIED' as const, // Pretend everything is modified so the analyzer checks it
+          changedLines: [], // Empty since we're analyzing all tests
+        }));
+      
+      logger.log(chalk.gray(`Found ${changedFiles.length} source file(s) to analyze.`));
+      logger.log();
+      
+    } else {
+      // --- EXISTING LOGIC: GIT ONLY ---
+      // Instantiate GitService and fetch changed files
+      const gitService = new GitService(repoPath);
+      
+      try {
+        changedFiles = await gitService.getChangedFiles(commitSha);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Unknown error';
+        if (options.json) {
+          console.log(JSON.stringify({ files: [], tests: [], grep: "" }));
+          process.exit(1);
+        }
+        logger.error(chalk.red(`✖ Git Error: ${message}`));
         process.exit(1);
       }
-      logger.error(chalk.red(`✖ Git Error: ${message}`));
-      process.exit(1);
-    }
-    
-    // Exit early if no changes found
-    if (changedFiles.length === 0) {
-      if (options.json) {
-        console.log(JSON.stringify({ files: [], tests: [], grep: "" }));
+      
+      // Exit early if no changes found
+      if (changedFiles.length === 0) {
+        if (options.json) {
+          console.log(JSON.stringify({ files: [], tests: [], grep: "" }));
+          process.exit(0);
+        }
+        logger.log();
+        logger.log(chalk.yellow('⚠ No file changes found between the commit and HEAD.'));
+        logger.log(chalk.gray('This could mean:'));
+        logger.log(chalk.gray('  • The commit SHA is the same as HEAD'));
+        logger.log(chalk.gray('  • All changes have been reverted'));
+        logger.log();
         process.exit(0);
       }
+      
+      logger.log(chalk.gray(`Found ${changedFiles.length} changed file(s).`));
       logger.log();
-      logger.log(chalk.yellow('⚠ No file changes found between the commit and HEAD.'));
-      logger.log(chalk.gray('This could mean:'));
-      logger.log(chalk.gray('  • The commit SHA is the same as HEAD'));
-      logger.log(chalk.gray('  • All changes have been reverted'));
-      logger.log();
-      process.exit(0);
     }
-    
-    logger.log(chalk.gray(`Found ${changedFiles.length} changed file(s).`));
-    logger.log();
     
     // Instantiate Analyzer and analyze the changes
     const analyzer = new Analyzer(repoPath);
