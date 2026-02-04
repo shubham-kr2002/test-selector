@@ -33,6 +33,33 @@ npm run build
 npm link
 ```
 
+## 📋 Example Repository Setup
+
+To test the Smart Test Selector, you can use the **flash-tests** repository:
+
+```bash
+# Clone flash-tests to a sibling directory
+cd ..
+git clone https://github.com/shubham-kr2002/flash-tests.git
+cd flash-tests
+npm install
+
+# Go back to test-selector
+cd ../test-selector
+```
+
+Your directory structure should look like:
+```
+parent-directory/
+├── test-selector/       (this repo)
+└── flash-tests/         (test repository)
+```
+
+Then run the tool against it:
+```bash
+node dist/index.js --repo ../flash-tests --all
+```
+
 ## 🏃 How to Run
 
 You can run the tool against any local clone of your test repository.
