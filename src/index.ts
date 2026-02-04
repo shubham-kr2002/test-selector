@@ -347,6 +347,7 @@ async function main(): Promise<void> {
       project.addSourceFilesAtPaths([
         path.join(repoPath, '**/*.spec.ts'),
         path.join(repoPath, '**/*.test.ts'),
+        path.join(repoPath, 'tests/**/*.setup.ts'),
       ]);
       
       // Get every test file
