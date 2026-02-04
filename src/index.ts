@@ -36,6 +36,10 @@ interface JsonOutput {
   tests: string[];
   /** Playwright-compatible regex pattern for -g/--grep flag */
   grep: string;
+  /** Files that contain dynamic test names and must be run in File Mode */
+  filesWithDynamicTests: string[];
+  /** True if any tests have dynamic names requiring File Mode fallback */
+  hasDynamicTests: boolean;
 }
 
 /**
@@ -212,21 +216,45 @@ function printReport(report: AnalysisReport): void {
  * Converts an analysis report to JSON output format.
  * Generates a Playwright-compatible grep pattern for granular test execution.
  * 
+ * Dynamic Test Name Fallback Strategy:
+ * - Tests with dynamic names (template literals with ${...}) cannot be safely grepped
+ * - If a file contains dynamic tests, it's added to filesWithDynamicTests
+ * - Dynamic tests are EXCLUDED from the grep pattern
+ * - The runner script should detect hasDynamicTests and run those files in File Mode
+ * 
  * @param report - The analysis report to convert
- * @returns JSON output object with files, tests arrays, and grep pattern
+ * @returns JSON output object with files, tests arrays, grep pattern, and dynamic test info
  */
 function toJsonOutput(report: AnalysisReport): JsonOutput {
   const filesSet = new Set<string>();
   const testsSet = new Set<string>();
+  const dynamicFilesSet = new Set<string>();
+  let hasDynamicTests = false;
 
   for (const fileResult of report.fileResults) {
+    // Check if this file has dynamic tests
+    if (fileResult.hasDynamicTests) {
+      hasDynamicTests = true;
+      dynamicFilesSet.add(fileResult.filePath);
+      // Still add to files list for File Mode execution
+      filesSet.add(fileResult.filePath);
+      // Skip adding tests from this file to the grep pattern
+      continue;
+    }
+
     // Add file path if it has impacted tests
     if (fileResult.tests.length > 0) {
       filesSet.add(fileResult.filePath);
     }
 
-    // Add each test name
+    // Add each non-dynamic test name
     for (const test of fileResult.tests) {
+      // Double-check: skip individual dynamic tests even if file isn't flagged
+      if (test.isDynamic) {
+        hasDynamicTests = true;
+        dynamicFilesSet.add(fileResult.filePath);
+        continue;
+      }
       testsSet.add(test.testName);
     }
   }
@@ -234,6 +262,7 @@ function toJsonOutput(report: AnalysisReport): JsonOutput {
   const testsArray = Array.from(testsSet);
   
   // Generate Playwright-compatible grep pattern
+  // Only include non-dynamic test names
   // Join escaped test names with | (OR operator in regex)
   const grepPattern = testsArray.length > 0
     ? testsArray.map(escapeRegExp).join('|')
@@ -243,6 +272,8 @@ function toJsonOutput(report: AnalysisReport): JsonOutput {
     files: Array.from(filesSet),
     tests: testsArray,
     grep: grepPattern,
+    filesWithDynamicTests: Array.from(dynamicFilesSet),
+    hasDynamicTests,
   };
 }
 

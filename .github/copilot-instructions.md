@@ -45,3 +45,11 @@ You are an expert in TypeScript, Node.js, and Static Analysis. You are building 
 * Use `async/await` for all I/O.
 * Use `path.resolve` for file paths to ensure cross-platform compatibility.
 * Add JSDoc comments to complex logic, specifically explaining the "Intersection Algorithm".
+
+## production-readiness
+* Include unit tests for each module using `jest`.
+* Provide a CLI runner script (`run-smart-tests.sh` and `run-smart-tests.ps1`) for easy execution.
+* identify top 3 performance bottlenecks and how to mitigate them.
+* follow best practices for error handling and identify top 3 error scenarios which can occur with each module and handle them via finding route cause of each errors.
+* also verify that the code adheres to the principles mentioned above.
+* after verification only push it to the main branch.

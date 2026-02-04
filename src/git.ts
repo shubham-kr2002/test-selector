@@ -2,16 +2,77 @@ import simpleGit, { SimpleGit } from 'simple-git';
 import { FileDiff, FileStatus } from './types';
 
 /**
+ * Custom error class for shallow clone detection.
+ * Provides clear guidance for CI environments.
+ */
+export class ShallowCloneError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ShallowCloneError';
+  }
+}
+
+/**
  * GitService handles all Git operations for retrieving file changes.
  * Uses `git diff -U0` (zero context) to get precise line-level changes.
  */
 export class GitService {
   private git: SimpleGit;
   private repoPath: string;
+  private isShallowRepository: boolean | null = null;
 
   constructor(repoPath: string) {
     this.repoPath = repoPath;
     this.git = simpleGit(repoPath);
+  }
+
+  /**
+   * Checks if the repository is a shallow clone.
+   * Shallow clones (fetch-depth: 1) don't have parent commit history.
+   * 
+   * @returns True if the repository is shallow, false otherwise
+   */
+  private async checkIsShallowRepository(): Promise<boolean> {
+    if (this.isShallowRepository !== null) {
+      return this.isShallowRepository;
+    }
+
+    try {
+      const result = await this.git.raw(['rev-parse', '--is-shallow-repository']);
+      this.isShallowRepository = result.trim() === 'true';
+      return this.isShallowRepository;
+    } catch {
+      // If the command fails, assume not shallow (older git versions)
+      this.isShallowRepository = false;
+      return false;
+    }
+  }
+
+  /**
+   * Validates that we can access the parent commit of the given SHA.
+   * This is critical for diff operations that compare against parent commits.
+   * 
+   * @param sha - The commit SHA to check parent access for
+   * @throws ShallowCloneError if parent commit is inaccessible in a shallow clone
+   */
+  private async validateParentAccess(sha: string): Promise<void> {
+    const isShallow = await this.checkIsShallowRepository();
+    
+    if (!isShallow) {
+      return; // Full clone, no issues
+    }
+
+    try {
+      // Try to access the parent commit
+      // `git rev-parse SHA^` resolves to the parent commit
+      await this.git.raw(['rev-parse', `${sha}^`]);
+    } catch {
+      // Cannot access parent commit in shallow clone
+      throw new ShallowCloneError(
+        'Error: This is a shallow clone. The Analyzer needs history to compare changes. ' +
+        "Please update your CI checkout configuration to set 'fetch-depth: 0'."
+      );
+    }
   }
 
   /**
@@ -71,10 +132,14 @@ export class GitService {
    * 
    * @param commitSha - The commit SHA to analyze
    * @returns Array of FileDiff objects with changed line information
+   * @throws ShallowCloneError if running in a shallow clone without history
    */
   async getChangedFiles(commitSha: string): Promise<FileDiff[]> {
     await this.validateRepository();
     await this.validateCommitSha(commitSha);
+    
+    // Check for shallow clone before attempting diff operations
+    await this.validateParentAccess(commitSha);
 
     try {
       // Use 'git show' to get the changes INTRODUCED by this specific commit

@@ -3,9 +3,24 @@ import * as path from 'path';
 import { FileDiff, ImpactedTest, FileAnalysisResult, AnalysisReport, ImpactType } from './types';
 
 /**
+ * Represents extracted test block information including dynamic detection.
+ */
+interface TestBlockInfo {
+  name: string;
+  startLine: number;
+  endLine: number;
+  /**
+   * True if the test name uses template literals with variables (${...}).
+   * These cannot be safely grepped and require File Mode.
+   */
+  isDynamic: boolean;
+}
+
+/**
  * Analyzer uses ts-morph for AST-based analysis to:
  * 1. Find tests that overlap with changed lines (Intersection Logic)
  * 2. Find tests impacted by dependency changes (Dependency Logic)
+ * 3. Detect dynamic test names that cannot be grepped
  */
 export class Analyzer {
   private project: Project;
@@ -32,15 +47,16 @@ export class Analyzer {
    * Extracts test blocks (test(), it(), describe()) from a source file.
    * Uses AST to find CallExpressions with test-related function names.
    * 
+   * Dynamic Test Name Detection:
+   * - Detects NoSubstitutionTemplateLiteral (backticks without variables)
+   * - Detects TemplateExpression (backticks WITH variables like ${id})
+   * - Template expressions with variables are marked as isDynamic: true
+   * 
    * @param sourceFile - The ts-morph SourceFile to analyze
-   * @returns Array of test information with name and line range
+   * @returns Array of test information with name, line range, and dynamic flag
    */
-  private extractTestBlocks(sourceFile: SourceFile): Array<{
-    name: string;
-    startLine: number;
-    endLine: number;
-  }> {
-    const testBlocks: Array<{ name: string; startLine: number; endLine: number }> = [];
+  private extractTestBlocks(sourceFile: SourceFile): TestBlockInfo[] {
+    const testBlocks: TestBlockInfo[] = [];
     
     // Find all call expressions
     const callExpressions = sourceFile.getDescendantsOfKind(SyntaxKind.CallExpression);
@@ -54,10 +70,33 @@ export class Analyzer {
         const args = callExpr.getArguments();
         const firstArg = args[0];
         
-        // Get the test name from the first argument (should be a string literal)
         let testName = 'unnamed test';
-        if (firstArg && firstArg.getKind() === SyntaxKind.StringLiteral) {
-          testName = firstArg.getText().slice(1, -1); // Remove quotes
+        let isDynamic = false;
+        
+        if (firstArg) {
+          const argKind = firstArg.getKind();
+          
+          // Regular string literal: test('simple name', ...)
+          if (argKind === SyntaxKind.StringLiteral) {
+            testName = firstArg.getText().slice(1, -1); // Remove quotes
+            isDynamic = false;
+          }
+          // Template literal without substitutions: test(`simple name`, ...)
+          else if (argKind === SyntaxKind.NoSubstitutionTemplateLiteral) {
+            testName = firstArg.getText().slice(1, -1); // Remove backticks
+            isDynamic = false;
+          }
+          // Template expression with variables: test(`User ${id}`, ...)
+          else if (argKind === SyntaxKind.TemplateExpression) {
+            // Get the template string but mark as dynamic
+            testName = firstArg.getText().slice(1, -1); // Remove backticks
+            isDynamic = true;
+          }
+          // Other expressions (variables, function calls) - treat as dynamic
+          else {
+            testName = `[dynamic: ${firstArg.getText()}]`;
+            isDynamic = true;
+          }
         }
         
         const startLine = callExpr.getStartLineNumber();
@@ -67,6 +106,7 @@ export class Analyzer {
           name: testName,
           startLine,
           endLine,
+          isDynamic,
         });
       }
     }
@@ -193,9 +233,17 @@ export class Analyzer {
 
   /**
    * Analyzes a test file to find tests that intersect with changed lines.
+   * 
+   * Dynamic Test Name Fallback Strategy:
+   * If any impacted test has a dynamic name (template literal with variables),
+   * we cannot safely generate a grep pattern for it. In this case:
+   * 1. Mark hasDynamicTests: true on the FileAnalysisResult
+   * 2. The file should be run in File Mode (without --grep)
+   * 3. Dynamic tests are excluded from grep pattern generation
    */
   private analyzeTestFile(absolutePath: string, fileDiff: FileDiff): FileAnalysisResult {
     const tests: ImpactedTest[] = [];
+    let hasDynamicTests = false;
 
     if (fileDiff.status === 'DELETED') {
       // For deleted files, we mark all tests as REMOVED
@@ -205,12 +253,14 @@ export class Analyzer {
           filePath: fileDiff.path,
           status: fileDiff.status,
           tests: [],
+          hasDynamicTests: false,
         };
       } catch {
         return {
           filePath: fileDiff.path,
           status: fileDiff.status,
           tests: [],
+          hasDynamicTests: false,
         };
       }
     }
@@ -221,14 +271,20 @@ export class Analyzer {
 
       for (const testBlock of testBlocks) {
         if (this.hasIntersection(testBlock.startLine, testBlock.endLine, fileDiff.changedLines)) {
+          // Check if this test has a dynamic name
+          if (testBlock.isDynamic) {
+            hasDynamicTests = true;
+          }
+          
           tests.push({
             testName: testBlock.name,
             fileName: fileDiff.path,
             impactType: 'DIRECT',
+            isDynamic: testBlock.isDynamic,
           });
         }
       }
-    } catch (error) {
+    } catch {
       // Silently skip files that can't be parsed
     }
 
@@ -236,12 +292,16 @@ export class Analyzer {
       filePath: fileDiff.path,
       status: fileDiff.status,
       tests,
+      hasDynamicTests,
     };
   }
 
   /**
    * Analyzes a test file that depends on a changed source file.
    * Marks all tests as DEPENDENCY impact.
+   * 
+   * Dynamic Test Name Handling:
+   * If any test has a dynamic name, mark hasDynamicTests: true.
    */
   private analyzeDependentTestFile(
     testFilePath: string,
@@ -249,16 +309,22 @@ export class Analyzer {
   ): FileAnalysisResult {
     const tests: ImpactedTest[] = [];
     const relativePath = path.relative(this.repoPath, testFilePath);
+    let hasDynamicTests = false;
 
     try {
       const sourceFile = this.project.addSourceFileAtPath(testFilePath);
       const testBlocks = this.extractTestBlocks(sourceFile);
 
       for (const testBlock of testBlocks) {
+        if (testBlock.isDynamic) {
+          hasDynamicTests = true;
+        }
+        
         tests.push({
           testName: testBlock.name,
           fileName: relativePath,
           impactType: 'DEPENDENCY',
+          isDynamic: testBlock.isDynamic,
         });
       }
     } catch {
@@ -269,6 +335,7 @@ export class Analyzer {
       filePath: relativePath,
       status: sourceFileDiff.status,
       tests,
+      hasDynamicTests,
     };
   }
 }

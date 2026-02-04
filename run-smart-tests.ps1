@@ -361,6 +361,19 @@ Write-Step "Analysis Results:"
 Write-Host "    Files impacted: $($data.files.Count)" -ForegroundColor Green
 Write-Host "    Tests impacted: $($data.tests.Count)" -ForegroundColor Green
 
+# Display dynamic test warning if applicable
+if ($data.hasDynamicTests -eq $true) {
+    Write-Host ""
+    Write-Warning "Some tests have dynamic names (template literals with variables)."
+    Write-Warning "These cannot be grepped and will be run in File Mode."
+    if ($data.filesWithDynamicTests -and $data.filesWithDynamicTests.Count -gt 0) {
+        Write-Step "Files with dynamic tests:"
+        foreach ($dynFile in $data.filesWithDynamicTests) {
+            Write-Host "    [!] $dynFile" -ForegroundColor Yellow
+        }
+    }
+}
+
 Write-Host ""
 Write-Step "Impacted Files:"
 foreach ($file in $data.files) {
@@ -379,9 +392,51 @@ if ($data.tests -and $data.tests.Count -gt 0) {
 Write-Host ""
 $exitCode = 0
 
-if ($data.grep -and $data.grep.Length -gt 0) {
-    Write-Step "Launching Playwright with granular execution (grep filter)..."
-    $exitCode = Invoke-PlaywrightWithGrep -GrepPattern $data.grep -RepoPath $RepoPath
+# Windows Command Line Limit Handling
+# The maximum command line length on Windows is 8191 characters.
+# We use a threshold of 7000 to leave room for the base command and other args.
+$GREP_LENGTH_THRESHOLD = 7000
+
+# Dynamic Test Handling Strategy:
+# If there are files with dynamic tests, they must be run in File Mode.
+# We handle this by running in two modes if needed, or falling back entirely to File Mode.
+$hasDynamicTests = $data.hasDynamicTests -eq $true
+$filesWithDynamic = @()
+if ($data.filesWithDynamicTests) {
+    $filesWithDynamic = @($data.filesWithDynamicTests)
+}
+
+if ($hasDynamicTests -and $filesWithDynamic.Count -gt 0) {
+    # Dynamic tests detected - fall back to File Mode for safety
+    # Running specific files instead of using grep ensures all tests in those files run
+    Write-Warning "Dynamic test names detected. Falling back to File Mode for affected files."
+    Write-Host ""
+    
+    if ($data.files -and $data.files.Count -gt 0) {
+        Write-Step "Launching Playwright with impacted files (File Mode due to dynamic tests)..."
+        $exitCode = Invoke-PlaywrightWithFiles -Files $data.files -RepoPath $RepoPath
+    } else {
+        Write-Warning "No files available. Running all tests."
+        $exitCode = Invoke-PlaywrightAll -RepoPath $RepoPath
+    }
+} elseif ($data.grep -and $data.grep.Length -gt 0) {
+    # Check if grep pattern exceeds Windows command line limit
+    if ($data.grep.Length -gt $GREP_LENGTH_THRESHOLD) {
+        Write-Warning "Grep pattern too long ($($data.grep.Length) chars > $GREP_LENGTH_THRESHOLD limit)."
+        Write-Warning "Windows Command Line limit is 8191 characters. Falling back to File Mode."
+        Write-Host ""
+        
+        if ($data.files -and $data.files.Count -gt 0) {
+            Write-Step "Launching Playwright with impacted files (File Mode)..."
+            $exitCode = Invoke-PlaywrightWithFiles -Files $data.files -RepoPath $RepoPath
+        } else {
+            Write-Warning "No files available for fallback. Running all tests."
+            $exitCode = Invoke-PlaywrightAll -RepoPath $RepoPath
+        }
+    } else {
+        Write-Step "Launching Playwright with granular execution (grep filter)..."
+        $exitCode = Invoke-PlaywrightWithGrep -GrepPattern $data.grep -RepoPath $RepoPath
+    }
 } elseif ($data.files -and $data.files.Count -gt 0) {
     Write-Step "Launching Playwright with impacted files..."
     $exitCode = Invoke-PlaywrightWithFiles -Files $data.files -RepoPath $RepoPath

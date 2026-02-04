@@ -20,6 +20,11 @@ export interface ImpactedTest {
   testName: string;
   fileName: string;
   impactType: ImpactType;
+  /**
+   * Indicates if the test has a dynamic name (template literal with variables).
+   * Dynamic tests cannot be safely grepped and require File Mode execution.
+   */
+  isDynamic?: boolean;
 }
 
 /**
@@ -37,6 +42,11 @@ export interface FileAnalysisResult {
   status: FileStatus;
   /** The tests selected from this file */
   tests: ImpactedTest[];
+  /**
+   * If true, the file contains dynamic test names that cannot be grepped.
+   * The entire file should be run instead of specific tests.
+   */
+  hasDynamicTests?: boolean;
 }
 
 /**
