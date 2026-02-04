@@ -142,13 +142,14 @@ function printFileResult(fileResult: FileAnalysisResult): void {
   logger.log();
   logger.log(color(`${icon} ${fileResult.filePath} [${fileResult.status}]`));
   
-  if (fileResult.status === 'DELETED') {
-    logger.log(chalk.gray('  └── File was deleted'));
-    return;
-  }
+  // REMOVED THE BLOCKER HERE (The "if DELETED return" check)
   
   if (fileResult.tests.length === 0) {
-    logger.log(chalk.gray('  └── No tests affected'));
+    if (fileResult.status === 'DELETED') {
+      logger.log(chalk.gray('   └── File was deleted (No specific tests found)'));
+    } else {
+      logger.log(chalk.gray('   └── No tests affected'));
+    }
     return;
   }
   
@@ -158,10 +159,15 @@ function printFileResult(fileResult: FileAnalysisResult): void {
     
     const isLast = i === fileResult.tests.length - 1;
     const prefix = isLast ? '└──' : '├──';
-    const impactLabel = getImpactLabel(test.impactType);
+    
+    // Handle REMOVED impact specifically
+    let impactLabel = getImpactLabel(test.impactType);
+    if (test.impactType === 'REMOVED') {
+      impactLabel = chalk.red('[REMOVED]');
+    }
     
     logger.log(
-      chalk.gray(`  ${prefix} `) +
+      chalk.gray(`   ${prefix} `) +
       chalk.white(`"${test.testName}"`) +
       ` ${impactLabel}`
     );
