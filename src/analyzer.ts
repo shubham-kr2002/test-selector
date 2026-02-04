@@ -133,39 +133,127 @@ export class Analyzer {
   }
 
   /**
-   * Finds all test files that import a given source file.
-   * Uses ts-morph's reference finding capabilities.
+   * Checks if a file path is inside node_modules.
+   * We skip external library files to avoid unnecessary traversal.
    * 
-   * @param sourceFilePath - The path to the source file
-   * @returns Array of test file paths that depend on this file
+   * @param filePath - The file path to check
+   * @returns True if the file is inside node_modules
+   */
+  private isNodeModulesFile(filePath: string): boolean {
+    const normalizedPath = filePath.replace(/\\/g, '/');
+    return normalizedPath.includes('/node_modules/') || normalizedPath.includes('\\node_modules\\');
+  }
+
+  /**
+   * Finds all files that directly import a given source file.
+   * Used as a helper for the BFS transitive dependency search.
+   * 
+   * @param targetFilePath - The absolute path to the file being imported
+   * @returns Array of file paths that import this file
+   */
+  private findDirectImporters(targetFilePath: string): string[] {
+    const importers: string[] = [];
+    const targetFileName = path.basename(targetFilePath, '.ts');
+    const targetFileNameWithoutExt = targetFileName.replace(/\.tsx?$/, '');
+    
+    const sourceFiles = this.project.getSourceFiles();
+    
+    for (const sourceFile of sourceFiles) {
+      const filePath = sourceFile.getFilePath();
+      
+      // Skip node_modules files
+      if (this.isNodeModulesFile(filePath)) {
+        continue;
+      }
+      
+      // Skip the target file itself
+      if (path.resolve(filePath) === path.resolve(targetFilePath)) {
+        continue;
+      }
+      
+      // Check imports for the target file
+      const importDeclarations = sourceFile.getImportDeclarations();
+      for (const importDecl of importDeclarations) {
+        const moduleSpecifier = importDecl.getModuleSpecifierValue();
+        
+        // Check if this import references our target file
+        // Handle both relative imports (./helper) and the actual filename
+        if (moduleSpecifier.includes(targetFileNameWithoutExt)) {
+          importers.push(filePath);
+          break;
+        }
+      }
+    }
+    
+    return importers;
+  }
+
+  /**
+   * Finds all test files that depend on a given source file using Breadth-First Search.
+   * This implements TRANSITIVE dependency tracking - if A imports B, and B imports C,
+   * and we change C, this will find A (not just B).
+   * 
+   * Algorithm (BFS):
+   * 1. Start with the changed file in the queue
+   * 2. Find all files that import it (parents/importers)
+   * 3. If a parent is a Test File, add it to the Impact List
+   * 4. If a parent is a Source File (and not visited), add it to queue to find ITS parents
+   * 5. Repeat until queue is empty
+   * 
+   * Cycle Prevention: Use a visited Set to track processed files.
+   * Performance: Skip files inside node_modules.
+   * 
+   * @param sourceFilePath - The path to the changed source file
+   * @returns Array of unique test file paths that depend on this file (directly or transitively)
    */
   private findDependentTestFiles(sourceFilePath: string): string[] {
-    const dependentTestFiles: string[] = [];
+    const impactedTestFiles = new Set<string>();
+    const visited = new Set<string>();
+    const queue: string[] = [path.resolve(sourceFilePath)];
     
     try {
       // Add all TypeScript files in the project for reference searching
+      // Only do this once at the start
       this.project.addSourceFilesAtPaths(path.join(this.repoPath, '**/*.ts'));
       
-      const sourceFiles = this.project.getSourceFiles();
-      const targetFileName = path.basename(sourceFilePath, '.ts');
-      
-      for (const sourceFile of sourceFiles) {
-        const filePath = sourceFile.getFilePath();
+      // BFS traversal
+      while (queue.length > 0) {
+        const currentFile = queue.shift()!;
+        const normalizedCurrentFile = path.resolve(currentFile);
         
-        // Only check test files
-        if (!this.isTestFile(filePath)) {
+        // Skip if already visited (cycle prevention)
+        if (visited.has(normalizedCurrentFile)) {
+          continue;
+        }
+        visited.add(normalizedCurrentFile);
+        
+        // Skip node_modules files
+        if (this.isNodeModulesFile(normalizedCurrentFile)) {
           continue;
         }
         
-        // Check imports for the changed file
-        const importDeclarations = sourceFile.getImportDeclarations();
-        for (const importDecl of importDeclarations) {
-          const moduleSpecifier = importDecl.getModuleSpecifierValue();
+        // Find all files that import the current file
+        const importers = this.findDirectImporters(normalizedCurrentFile);
+        
+        for (const importerPath of importers) {
+          const normalizedImporter = path.resolve(importerPath);
           
-          // Check if this import references our changed file
-          if (moduleSpecifier.includes(targetFileName)) {
-            dependentTestFiles.push(filePath);
-            break;
+          // Skip if already visited
+          if (visited.has(normalizedImporter)) {
+            continue;
+          }
+          
+          // Skip node_modules
+          if (this.isNodeModulesFile(normalizedImporter)) {
+            continue;
+          }
+          
+          if (this.isTestFile(importerPath)) {
+            // Found a test file - add to impact list
+            impactedTestFiles.add(normalizedImporter);
+          } else {
+            // Source file - add to queue to find its parents (transitive search)
+            queue.push(normalizedImporter);
           }
         }
       }
@@ -173,7 +261,7 @@ export class Analyzer {
       // If we can't find dependencies, return empty array (silently)
     }
     
-    return dependentTestFiles;
+    return Array.from(impactedTestFiles);
   }
 
   /**
