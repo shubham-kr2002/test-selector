@@ -466,10 +466,11 @@ async function main(): Promise<void> {
 
 // Run the CLI
 main().catch((error: unknown) => {
+  const message = error instanceof Error ? error.message : 'An unexpected error occurred';
   if (options.json) {
     console.log(JSON.stringify({ files: [], tests: [], grep: "" }));
   } else {
-    console.error(chalk.red('Fatal error:'), error);
+    console.error(chalk.red(`✖ Fatal Error: ${message}`));
   }
   process.exit(1);
 });
