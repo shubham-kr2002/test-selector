@@ -1,10 +1,10 @@
 {
-  "name": "test-selector",
+  "name": "smart-test-selector",
   "version": "1.0.0",
-  "description": "CLI tool that identifies which tests need to run based on Git changes",
+  "description": "Granular test impact analysis tool",
   "main": "dist/index.js",
   "bin": {
-    "test-selector": "./dist/index.js"
+    "smart-test": "./dist/index.js"
   },
   "scripts": {
     "build": "tsc",
