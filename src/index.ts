@@ -336,13 +336,20 @@ async function main(): Promise<void> {
       // --- NEW LOGIC: SCAN EVERYTHING ---
       logger.log(chalk.blue('🔍 Scanning entire repository (Mode: ALL)...'));
       
-      // Create a temporary project just to get all source files
+      // Initialize Project WITHOUT tsconfig to avoid "exclude" rules
+      // This ensures we find ALL test files including example.spec.ts
       const project = new Project({
-        tsConfigFilePath: path.join(repoPath, 'tsconfig.json'),
-        skipAddingFilesFromTsConfig: false,
+        // Don't use tsconfig - it may exclude files we want to analyze
       });
       
-      // Get every .ts file in the repo
+      // Manually add source files using Glob patterns
+      // This forces finding ALL .spec.ts and .test.ts files regardless of tsconfig exclusions
+      project.addSourceFilesAtPaths([
+        path.join(repoPath, '**/*.spec.ts'),
+        path.join(repoPath, '**/*.test.ts'),
+      ]);
+      
+      // Get every test file
       const allSourceFiles = project.getSourceFiles();
       
       // Filter out node_modules and map to FileDiff structure
@@ -357,7 +364,7 @@ async function main(): Promise<void> {
           changedLines: [], // Empty since we're analyzing all tests
         }));
       
-      logger.log(chalk.gray(`Found ${changedFiles.length} source file(s) to analyze.`));
+      logger.log(chalk.gray(`Found ${changedFiles.length} test file(s) to analyze.`));
       logger.log();
       
     } else {

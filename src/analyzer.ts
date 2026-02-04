@@ -57,6 +57,60 @@ export class Analyzer {
    * @param sourceFile - The ts-morph SourceFile to analyze
    * @returns Array of test information with name, line range, and dynamic flag
    */
+  /**
+   * Helper to check if an expression is a test function call.
+   * Matches: test, test.only, test.describe, test.skip, it, it.only, describe, describe.only, etc.
+   * 
+   * @param text - The expression text to check
+   * @returns True if this is a test function call
+   */
+  private isTestFunction(text: string): boolean {
+    // Exact matches
+    if (['test', 'it', 'describe'].includes(text)) {
+      return true;
+    }
+    // Match test.*, it.*, describe.* patterns (test.only, test.describe, it.skip, etc.)
+    if (text.startsWith('test.') || text.startsWith('it.') || text.startsWith('describe.')) {
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * Helper to safely extract test names from different syntax types.
+   * Handles StringLiteral, NoSubstitutionTemplateLiteral, and TemplateExpression.
+   * 
+   * @param args - The arguments array from the call expression
+   * @returns Object with testName and isDynamic flag, or undefined if no valid name
+   */
+  private getTestName(args: ReturnType<typeof this.project.getSourceFiles>[0]['getDescendantsOfKind'] extends (kind: SyntaxKind) => infer R ? R : never): { name: string; isDynamic: boolean } | undefined {
+    if (args.length === 0) return undefined;
+    const nameNode = args[0];
+    if (!nameNode) return undefined;
+
+    const argKind = nameNode.getKind();
+
+    // Case 1: Simple quotes 'test name' or "test name"
+    if (argKind === SyntaxKind.StringLiteral) {
+      return { name: nameNode.getText().slice(1, -1), isDynamic: false };
+    }
+
+    // Case 2: Backticks with NO variables `test name`
+    if (argKind === SyntaxKind.NoSubstitutionTemplateLiteral) {
+      return { name: nameNode.getText().slice(1, -1), isDynamic: false };
+    }
+
+    // Case 3: Backticks WITH variables `test ${id}` (The Hero Fix!)
+    // We return the raw text structure so we count it, even if we can't resolve the variable
+    if (argKind === SyntaxKind.TemplateExpression) {
+      // .getText() returns `test ${id}`, we strip the backticks
+      return { name: nameNode.getText().replace(/^`|`$/g, ''), isDynamic: true };
+    }
+
+    // Case 4: Other expressions (variables, function calls) - treat as dynamic
+    return { name: `[dynamic: ${nameNode.getText()}]`, isDynamic: true };
+  }
+
   private extractTestBlocks(sourceFile: SourceFile): TestBlockInfo[] {
     const testBlocks: TestBlockInfo[] = [];
     
@@ -67,49 +121,24 @@ export class Analyzer {
       const expression = callExpr.getExpression();
       const functionName = expression.getText();
       
-      // Check if this is a test function (test, it, describe)
-      if (['test', 'it', 'describe'].includes(functionName)) {
+      // Check if this is a test function (test, it, describe, test.only, test.describe, etc.)
+      if (this.isTestFunction(functionName)) {
         const args = callExpr.getArguments();
-        const firstArg = args[0];
         
-        let testName = 'unnamed test';
-        let isDynamic = false;
+        // Use the helper to extract test name
+        const testNameResult = this.getTestName(args);
         
-        if (firstArg) {
-          const argKind = firstArg.getKind();
+        if (testNameResult) {
+          const startLine = callExpr.getStartLineNumber();
+          const endLine = callExpr.getEndLineNumber();
           
-          // Regular string literal: test('simple name', ...)
-          if (argKind === SyntaxKind.StringLiteral) {
-            testName = firstArg.getText().slice(1, -1); // Remove quotes
-            isDynamic = false;
-          }
-          // Template literal without substitutions: test(`simple name`, ...)
-          else if (argKind === SyntaxKind.NoSubstitutionTemplateLiteral) {
-            testName = firstArg.getText().slice(1, -1); // Remove backticks
-            isDynamic = false;
-          }
-          // Template expression with variables: test(`User ${id}`, ...)
-          else if (argKind === SyntaxKind.TemplateExpression) {
-            // Get the template string but mark as dynamic
-            testName = firstArg.getText().slice(1, -1); // Remove backticks
-            isDynamic = true;
-          }
-          // Other expressions (variables, function calls) - treat as dynamic
-          else {
-            testName = `[dynamic: ${firstArg.getText()}]`;
-            isDynamic = true;
-          }
+          testBlocks.push({
+            name: testNameResult.name,
+            startLine,
+            endLine,
+            isDynamic: testNameResult.isDynamic,
+          });
         }
-        
-        const startLine = callExpr.getStartLineNumber();
-        const endLine = callExpr.getEndLineNumber();
-        
-        testBlocks.push({
-          name: testName,
-          startLine,
-          endLine,
-          isDynamic,
-        });
       }
     }
     
@@ -166,16 +195,22 @@ export class Analyzer {
    * Checks if any changed lines fall within the test block's line range.
    * Only tests with overlapping changes are selected.
    * 
+   * Special case: If changedLines is empty (--all mode), returns true to select ALL tests.
+   * 
    * @param testStartLine - The start line of the test block
    * @param testEndLine - The end line of the test block
-   * @param changedLines - Array of changed line numbers
-   * @returns True if there is an intersection
+   * @param changedLines - Array of changed line numbers (empty = select all)
+   * @returns True if there is an intersection or if changedLines is empty
    */
   private hasIntersection(
     testStartLine: number,
     testEndLine: number,
     changedLines: number[]
   ): boolean {
+    // In --all mode, changedLines is empty - select ALL tests
+    if (changedLines.length === 0) {
+      return true;
+    }
     return changedLines.some(line => line >= testStartLine && line <= testEndLine);
   }
 
