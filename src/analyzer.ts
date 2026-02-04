@@ -1,6 +1,7 @@
 import { Project, SourceFile, SyntaxKind } from 'ts-morph';
 import * as path from 'path';
 import { FileDiff, ImpactedTest, FileAnalysisResult, AnalysisReport, ImpactType } from './types';
+import { GitService } from './git';
 
 /**
  * Represents extracted test block information including dynamic detection.
@@ -21,6 +22,7 @@ interface TestBlockInfo {
  * 1. Find tests that overlap with changed lines (Intersection Logic)
  * 2. Find tests impacted by dependency changes (Dependency Logic)
  * 3. Detect dynamic test names that cannot be grepped
+ * 4. Detect REMOVED tests by comparing current vs previous commit
  */
 export class Analyzer {
   private project: Project;
@@ -112,6 +114,51 @@ export class Analyzer {
     }
     
     return testBlocks;
+  }
+
+  /**
+   * Extracts test blocks from raw source code content.
+   * Creates a temporary source file for analysis and cleans up after.
+   * 
+   * @param content - The raw TypeScript/JavaScript source code
+   * @param filePath - A virtual file path for the temporary source file
+   * @returns Array of test information, or null if parsing fails
+   */
+  private extractTestBlocksFromContent(content: string, filePath: string): TestBlockInfo[] | null {
+    try {
+      // Create a temporary source file from the content
+      const tempSourceFile = this.project.createSourceFile(
+        `__temp_${Date.now()}_${path.basename(filePath)}`,
+        content,
+        { overwrite: true }
+      );
+      
+      const testBlocks = this.extractTestBlocks(tempSourceFile);
+      
+      // Clean up: Remove the temporary source file to free memory
+      this.project.removeSourceFile(tempSourceFile);
+      
+      return testBlocks;
+    } catch {
+      // Parsing failed (syntax error) - return null
+      return null;
+    }
+  }
+
+  /**
+   * Compares old and new test lists to find REMOVED tests.
+   * A test is considered REMOVED if it existed in the old version
+   * but is missing from the new version.
+   * 
+   * @param oldTests - Tests from the previous commit
+   * @param newTests - Tests from the current version
+   * @returns Array of test names that were removed
+   */
+  private findRemovedTests(oldTests: TestBlockInfo[], newTests: TestBlockInfo[]): string[] {
+    const newTestNames = new Set(newTests.map(t => t.name));
+    return oldTests
+      .filter(oldTest => !newTestNames.has(oldTest.name))
+      .map(t => t.name);
   }
 
   /**
@@ -269,12 +316,20 @@ export class Analyzer {
    * 
    * For test files (.spec.ts): Uses Intersection Logic to find specific tests.
    * For source files: Uses Dependency Logic to find impacted tests.
+   * For MODIFIED/DELETED test files: Detects REMOVED tests by comparing versions.
    * 
    * @param changedFiles - Array of file diffs from GitService
    * @param commitSha - The commit SHA being analyzed
+   * @param prevCommitSha - The parent commit SHA for comparison (null for --all mode)
+   * @param gitService - GitService instance for fetching file content (null for --all mode)
    * @returns Complete analysis report
    */
-  analyze(changedFiles: FileDiff[], commitSha: string): AnalysisReport {
+  async analyze(
+    changedFiles: FileDiff[],
+    commitSha: string,
+    prevCommitSha: string | null = null,
+    gitService: GitService | null = null
+  ): Promise<AnalysisReport> {
     const fileResults: FileAnalysisResult[] = [];
     const processedTestFiles = new Set<string>();
 
@@ -282,8 +337,8 @@ export class Analyzer {
       const absolutePath = path.resolve(this.repoPath, fileDiff.path);
       
       if (this.isTestFile(fileDiff.path)) {
-        // Handle test file changes with Intersection Logic
-        const result = this.analyzeTestFile(absolutePath, fileDiff);
+        // Handle test file changes with Intersection Logic + REMOVED detection
+        const result = await this.analyzeTestFile(absolutePath, fileDiff, prevCommitSha, gitService);
         if (result.tests.length > 0 || fileDiff.status === 'DELETED') {
           fileResults.push(result);
           processedTestFiles.add(absolutePath);
@@ -321,6 +376,7 @@ export class Analyzer {
 
   /**
    * Analyzes a test file to find tests that intersect with changed lines.
+   * Also detects REMOVED tests by comparing against the previous commit.
    * 
    * Dynamic Test Name Fallback Strategy:
    * If any impacted test has a dynamic name (template literal with variables),
@@ -328,38 +384,64 @@ export class Analyzer {
    * 1. Mark hasDynamicTests: true on the FileAnalysisResult
    * 2. The file should be run in File Mode (without --grep)
    * 3. Dynamic tests are excluded from grep pattern generation
+   * 
+   * REMOVED Test Detection:
+   * 1. Get current tests from file on disk
+   * 2. Get old content from previous commit via gitService
+   * 3. Compare to find tests that existed before but are now missing
+   * 4. Mark missing tests as REMOVED
    */
-  private analyzeTestFile(absolutePath: string, fileDiff: FileDiff): FileAnalysisResult {
+  private async analyzeTestFile(
+    absolutePath: string,
+    fileDiff: FileDiff,
+    prevCommitSha: string | null,
+    gitService: GitService | null
+  ): Promise<FileAnalysisResult> {
     const tests: ImpactedTest[] = [];
     let hasDynamicTests = false;
 
     if (fileDiff.status === 'DELETED') {
-      // For deleted files, we mark all tests as REMOVED
-      try {
-        // Note: We can't read deleted files from disk, so we just report the file
-        return {
-          filePath: fileDiff.path,
-          status: fileDiff.status,
-          tests: [],
-          hasDynamicTests: false,
-        };
-      } catch {
-        return {
-          filePath: fileDiff.path,
-          status: fileDiff.status,
-          tests: [],
-          hasDynamicTests: false,
-        };
+      // For deleted files, we need to get tests from the PREVIOUS commit
+      // All tests in the deleted file are marked as REMOVED
+      if (prevCommitSha && gitService) {
+        try {
+          const oldContent = await gitService.getFileContent(prevCommitSha, fileDiff.path);
+          if (oldContent) {
+            const oldTests = this.extractTestBlocksFromContent(oldContent, fileDiff.path);
+            if (oldTests) {
+              for (const oldTest of oldTests) {
+                tests.push({
+                  testName: oldTest.name,
+                  fileName: fileDiff.path,
+                  impactType: 'REMOVED',
+                  isDynamic: oldTest.isDynamic,
+                });
+                if (oldTest.isDynamic) {
+                  hasDynamicTests = true;
+                }
+              }
+            }
+          }
+        } catch {
+          // Could not get old content - just report the file
+        }
       }
+      
+      return {
+        filePath: fileDiff.path,
+        status: fileDiff.status,
+        tests,
+        hasDynamicTests,
+      };
     }
 
     try {
       const sourceFile = this.project.addSourceFileAtPath(absolutePath);
-      const testBlocks = this.extractTestBlocks(sourceFile);
+      const currentTestBlocks = this.extractTestBlocks(sourceFile);
 
-      for (const testBlock of testBlocks) {
+      // Find tests that intersect with changed lines (DIRECT impact)
+      for (const testBlock of currentTestBlocks) {
         if (this.hasIntersection(testBlock.startLine, testBlock.endLine, fileDiff.changedLines)) {
-          // Check if this test has a dynamic name
           if (testBlock.isDynamic) {
             hasDynamicTests = true;
           }
@@ -370,6 +452,34 @@ export class Analyzer {
             impactType: 'DIRECT',
             isDynamic: testBlock.isDynamic,
           });
+        }
+      }
+
+      // Detect REMOVED tests by comparing with previous commit
+      if (prevCommitSha && gitService && fileDiff.status === 'MODIFIED') {
+        try {
+          const oldContent = await gitService.getFileContent(prevCommitSha, fileDiff.path);
+          if (oldContent) {
+            const oldTests = this.extractTestBlocksFromContent(oldContent, fileDiff.path);
+            if (oldTests) {
+              const removedTestNames = this.findRemovedTests(oldTests, currentTestBlocks);
+              
+              for (const removedTestName of removedTestNames) {
+                const oldTest = oldTests.find(t => t.name === removedTestName);
+                tests.push({
+                  testName: removedTestName,
+                  fileName: fileDiff.path,
+                  impactType: 'REMOVED',
+                  isDynamic: oldTest?.isDynamic ?? false,
+                });
+                if (oldTest?.isDynamic) {
+                  hasDynamicTests = true;
+                }
+              }
+            }
+          }
+        } catch {
+          // Could not compare with old version - continue with current analysis
         }
       }
     } catch {

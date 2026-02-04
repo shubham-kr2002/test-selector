@@ -390,9 +390,52 @@ async function main(): Promise<void> {
       logger.log();
     }
     
+    // Calculate parent commit SHA for REMOVED test detection
+    let parentCommitSha: string | null = null;
+    let activeGitService: GitService | null = null;
+    
+    if (!options.all && options.commit) {
+      activeGitService = new GitService(repoPath);
+      try {
+        parentCommitSha = await activeGitService.getParentCommitSha(options.commit);
+        if (parentCommitSha) {
+          logger.log(chalk.gray(`Parent commit: ${parentCommitSha.substring(0, 8)}...`));
+        }
+      } catch {
+        // No parent commit (initial commit) - continue without REMOVED detection
+        logger.log(chalk.gray('No parent commit found (initial commit or shallow clone).'));
+      }
+    }
+    
     // Instantiate Analyzer and analyze the changes
     const analyzer = new Analyzer(repoPath);
-    const report = analyzer.analyze(changedFiles, commitSha);
+    
+    // Safety wrap: Catch AST parsing errors and fall back gracefully
+    let report: AnalysisReport;
+    try {
+      report = await analyzer.analyze(changedFiles, commitSha, parentCommitSha, activeGitService);
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      logger.log(chalk.yellow(`⚠ Analysis error: ${errorMessage}`));
+      logger.log(chalk.yellow('⚠ Falling back to File Mode (all changed files will be tested).'));
+      
+      // Fallback: Create a minimal report with just file paths
+      const fallbackResults: FileAnalysisResult[] = changedFiles
+        .filter(f => f.path.endsWith('.spec.ts') || f.path.endsWith('.test.ts'))
+        .map(f => ({
+          filePath: f.path,
+          status: f.status,
+          tests: [],
+          hasDynamicTests: true, // Force file mode
+        }));
+      
+      report = {
+        commitSha,
+        repoPath,
+        fileResults: fallbackResults,
+        totalTestsSelected: 0,
+      };
+    }
     
     // Output based on mode
     if (options.json) {
