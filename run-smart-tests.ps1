@@ -35,7 +35,7 @@ param(
     [string]$RepoPath = ".",
     
     [Parameter()]
-    [string]$SmartToolPath = "..\test-selector\src\index.ts",
+    [string]$SmartToolPath = ".\src\index.ts",
     
     [Parameter()]
     [string]$CommitSha = "HEAD",
