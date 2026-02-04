@@ -1,0 +1,26 @@
+{
+  "compilerOptions": {
+    /* 1. Project Basics */
+    "target": "ES2022",                // Modern JS features
+    "module": "commonjs",              // Easiest for Node.js CLIs
+    "moduleResolution": "node",
+    "rootDir": "./src",
+    "outDir": "./dist",
+    
+    /* 2. Strictness (High Quality) */
+    "strict": true,
+    "noImplicitReturns": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUncheckedIndexedAccess": true,  // Keeps your "Senior Dev" safety level
+    
+    /* 3. Interop & Libraries */
+    "esModuleInterop": true,           // Allows 'import path from "path"'
+    "skipLibCheck": true,              // Speeds up compile time
+    "forceConsistentCasingInFileNames": true,
+
+    /* 4. The Critical Fix for Node */
+    "types": ["node"]                  // Access to process, path, fs
+  },
+  "include": ["src/**/*"],
+  "exclude": ["node_modules"]
+}
