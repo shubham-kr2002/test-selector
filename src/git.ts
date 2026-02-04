@@ -250,4 +250,44 @@ export class GitService {
       throw new Error(`Failed to get changed files for commit ${commitSha}: ${message}`);
     }
   }
+
+  /**
+   * Gets the content of a file at a specific commit.
+   * Uses `git show <commit>:<path>` to retrieve historical file content.
+   * 
+   * @param commitSha - The commit SHA to get the file from
+   * @param filePath - The path to the file (relative to repo root)
+   * @returns The file content as a string, or null if the file didn't exist
+   */
+  async getFileContent(commitSha: string, filePath: string): Promise<string | null> {
+    try {
+      // Normalize path separators for git (use forward slashes)
+      const normalizedPath = filePath.replace(/\\/g, '/');
+      
+      // git show <commit>:<path> returns the file content at that commit
+      const content = await this.git.raw(['show', `${commitSha}:${normalizedPath}`]);
+      return content;
+    } catch {
+      // File didn't exist at that commit (new file) - return null, don't throw
+      return null;
+    }
+  }
+
+  /**
+   * Gets the parent commit SHA for a given commit.
+   * Useful for comparing current state against previous state.
+   * 
+   * @param commitSha - The commit SHA to get the parent of
+   * @returns The parent commit SHA, or null if no parent (initial commit)
+   */
+  async getParentCommitSha(commitSha: string): Promise<string | null> {
+    try {
+      // git rev-parse <sha>^ returns the parent commit
+      const parentSha = await this.git.raw(['rev-parse', `${commitSha}^`]);
+      return parentSha.trim();
+    } catch {
+      // No parent commit (initial commit) - return null
+      return null;
+    }
+  }
 }
